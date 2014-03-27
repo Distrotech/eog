@@ -160,6 +160,9 @@ struct _EogScrollViewPrivate {
 	GdkRGBA *override_bg_color;
 
 	cairo_surface_t *background_surface;
+
+	GtkGesture *zoom_gesture;
+	gdouble initial_zoom;
 };
 
 static void scroll_by (EogScrollView *view, int xofs, int yofs);
@@ -1180,8 +1183,10 @@ scroll_to (EogScrollView *view, int x, int y, gboolean change_adjustments)
 #endif
 	/* Scroll the window area and process exposure synchronously. */
 
-	gdk_window_scroll (window, -xofs, -yofs);
-	gdk_window_process_updates (window, TRUE);
+	if (!gtk_gesture_is_recognized (priv->zoom_gesture)) {
+		gdk_window_scroll (window, -xofs, -yofs);
+		gdk_window_process_updates (window, TRUE);
+	}
 
  out:
 	if (!change_adjustments)
@@ -1325,6 +1330,13 @@ set_zoom (EogScrollView *view, double zoom,
 	/* set new values */
 	priv->xofs = xofs; /* (img_width * x_rel * zoom) - anchorx; */
 	priv->yofs = yofs; /* (img_height * y_rel * zoom) - anchory; */
+
+	if (priv->dragging) {
+		priv->drag_anchor_x = anchorx;
+		priv->drag_anchor_y = anchory;
+		priv->drag_ofs_x = priv->xofs;
+		priv->drag_ofs_y = priv->yofs;
+	}
 #if 0
 	g_print ("xofs: %i  yofs: %i\n", priv->xofs, priv->yofs);
 #endif
@@ -1689,6 +1701,9 @@ eog_scroll_view_motion_event (GtkWidget *widget, GdkEventMotion *event, gpointer
 	view = EOG_SCROLL_VIEW (data);
 	priv = view->priv;
 
+	if (gtk_gesture_is_recognized (priv->zoom_gesture))
+		return TRUE;
+
 	if (!priv->dragging)
 		return FALSE;
 
@@ -1900,6 +1915,59 @@ display_draw (GtkWidget *widget, cairo_t *cr, gpointer data)
 	return TRUE;
 }
 
+static void
+zoom_gesture_begin_cb (GtkGestureZoom   *gesture,
+		       GdkEventSequence *sequence,
+		       EogScrollView    *view)
+{
+	gdouble center_x, center_y;
+	EogScrollViewPrivate *priv;
+
+	priv = view->priv;
+
+	/* Displace dragging point to gesture center */
+	gtk_gesture_get_bounding_box_center (gesture, &center_x, &center_y);
+	priv->drag_anchor_x = center_x;
+	priv->drag_anchor_y = center_y;
+	priv->drag_ofs_x = priv->xofs;
+	priv->drag_ofs_y = priv->yofs;
+	priv->dragging = TRUE;
+	priv->initial_zoom = priv->zoom;
+
+        gtk_widget_set_gesture_state (GTK_WIDGET (view), GTK_GESTURE (gesture),
+                                      GTK_EVENT_SEQUENCE_CLAIMED);
+}
+
+static void
+zoom_gesture_update_cb (GtkGestureZoom   *gesture,
+			GdkEventSequence *sequence,
+			EogScrollView    *view)
+{
+	gdouble center_x, center_y, scale;
+	EogScrollViewPrivate *priv;
+
+	if (!gtk_gesture_zoom_get_scale_delta (gesture, &scale))
+		return;
+
+	priv = view->priv;
+	gtk_gesture_get_bounding_box_center (gesture, &center_x, &center_y);
+
+	drag_to (view, center_x, center_y);
+	set_zoom (view, priv->initial_zoom * scale, TRUE,
+		  center_x, center_y);
+}
+
+static void
+zoom_gesture_end_cb (GtkGestureZoom   *gesture,
+		     GdkEventSequence *sequence,
+		     EogScrollView    *view)
+{
+	EogScrollViewPrivate *priv;
+
+	priv = view->priv;
+	priv->dragging = FALSE;
+        eog_scroll_view_set_cursor (view, EOG_SCROLL_VIEW_CURSOR_NORMAL);
+}
 
 /*==================================
 
@@ -2486,6 +2554,7 @@ eog_scroll_view_init (EogScrollView *view)
 			       | GDK_BUTTON_RELEASE_MASK
 			       | GDK_POINTER_MOTION_MASK
 			       | GDK_POINTER_MOTION_HINT_MASK
+			       | GDK_TOUCH_MASK
 			       | GDK_SCROLL_MASK
 			       | GDK_KEY_PRESS_MASK);
 	g_signal_connect (G_OBJECT (priv->display), "configure_event",
@@ -2552,6 +2621,18 @@ eog_scroll_view_init (EogScrollView *view)
 			 "antialiasing-out", G_SETTINGS_BIND_GET);
 
 	g_object_unref (settings);
+
+	priv->zoom_gesture = gtk_gesture_zoom_new (GTK_WIDGET (view));
+	g_signal_connect (priv->zoom_gesture, "begin",
+			  G_CALLBACK (zoom_gesture_begin_cb), view);
+	g_signal_connect (priv->zoom_gesture, "update",
+			  G_CALLBACK (zoom_gesture_update_cb), view);
+	g_signal_connect (priv->zoom_gesture, "end",
+			  G_CALLBACK (zoom_gesture_end_cb), view);
+	g_signal_connect (priv->zoom_gesture, "cancel",
+			  G_CALLBACK (zoom_gesture_end_cb), view);
+	gtk_widget_add_gesture (GTK_WIDGET (view), priv->zoom_gesture,
+                                GTK_PHASE_CAPTURE);
 }
 
 static void
