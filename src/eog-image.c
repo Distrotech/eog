@@ -445,6 +445,7 @@ eog_image_real_transform (EogImage     *img,
 
 		priv->width = gdk_pixbuf_get_width (transformed);
 		priv->height = gdk_pixbuf_get_height (transformed);
+		eog_image_modified (img);
 
 		modified = TRUE;
 	}
